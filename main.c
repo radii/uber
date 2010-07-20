@@ -688,6 +688,75 @@ static inline int tvdiff(const struct timeval a, const struct timeval b)
 	return (b.tv_sec - a.tv_sec) * 1000000 + (b.tv_usec - a.tv_usec);
 }
 
+int
+buffered_read(int fd, char *dest, int sz)
+{
+#define BUFSZ 1024
+	static int last_fd, head, tail;
+	static char buf[BUFSZ];
+	char *p = dest;
+	int a, n = sz;
+	int nbuf;
+	int ret = -1;
+
+	/* if we have stuff buffered for another caller, bail. */
+	if (fd != last_fd && head != tail)
+		return read(fd, dest, sz);
+
+	nbuf = head - tail;
+
+#define min(a,b) ((a)<(b)?(a):(b))
+
+	/* if we have buffered data, copy as much as will fit */
+	if (nbuf > 0) {
+		a = min(n, nbuf);
+		memcpy(p, buf + tail, a);
+		p += a;
+		tail += a;
+		n -= a;
+		ret = a;
+	}
+
+	/* if we didn't satisfy the reader, get another buffer */
+	if (n > 0) {
+		g_assert(head == tail);
+
+		if (n >= BUFSZ)
+			return read(fd, p, n);
+
+		if ((a = read(fd, buf, BUFSZ)) == -1)
+			goto out;
+		if (a == 0) {
+			/* EOF!  If we copied out buffered data, out: will
+			 * return its len; otherwise we need to return 0.
+			 */
+			ret = 0;
+			goto out;
+		}
+		last_fd = fd;
+		head = a;
+		tail = min(n, a);
+		memcpy(p, buf, tail);
+		p += tail;
+	}
+out:
+	/*
+	 * if we gave the user any data, then return that length; otherwise,
+	 * return error (or EOF).
+	 */
+	return (p - dest) ?: ret;
+}
+
+void hexdump(FILE *f, void *p, int n)
+{
+	int i;
+	unsigned char *x = p;
+
+	for(i=0; i<n; i++)
+		fprintf(f, "%02x%s", x[i],
+			(i%16 == 15 || i==n-1) ? "\n":i%8==7?"  ":" ");
+}
+
 static int
 read_blktrace(int fd, struct blk_io_trace *t)
 {
@@ -695,26 +764,29 @@ read_blktrace(int fd, struct blk_io_trace *t)
 	static unsigned int n;
 	static void *buf;
 	static int buflen;
+	static int numblk;
 	void *p;
 	int c;
-	struct timeval tv1, tv2;
-	int usec;
 
 	p = (char *)&b + n;
-	gettimeofday(&tv1, 0);
-	c = read(fd, p, sizeof(b) - n);
-	gettimeofday(&tv2, 0);
+	c = buffered_read(fd, p, sizeof(b) - n);
+
 	if (c == -1) {
 		if (errno != EAGAIN)
 			fprintf(stderr, "read(%d): %s\n", fd, strerror(errno));
 		return 0;
 	}
-	usec = tvdiff(tv1, tv2);
-	if (usec > 1000)
-		g_printerr("read took %d usec\n", usec);
 	n += c;
 	if (n < sizeof(b))
 		return 0;
+
+	numblk++;
+	if (b.magic != (BLK_IO_TRACE_MAGIC | BLK_IO_TRACE_VERSION)) {
+		fprintf(stderr, "wrong magic! record %d buffer =\n", numblk);
+		hexdump(stderr, &b, sizeof(b));
+		exit(1);
+	}
+
 	if (b.pdu_len > 0) {
 		if (b.pdu_len > buflen) {
 			buflen = b.pdu_len;
@@ -725,7 +797,7 @@ read_blktrace(int fd, struct blk_io_trace *t)
 		}
 		// XXX this should escape back out to the poller
 		for (p = buf, c = b.pdu_len; c > 0; ) {
-			int a = read(fd, buf, b.pdu_len);
+			int a = buffered_read(fd, p, c);
 
 			if (a < 0) continue;
 			c -= a;
