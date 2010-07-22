@@ -829,7 +829,7 @@ find_io(struct blk_io_trace t)
 		if(p->t->sector == t.sector) {
 			*prevp = p->next;
 			r = p->t;
-			free(p);
+			g_free(p);
 			return r;
 		}
 		prevp = &p->next;
@@ -881,7 +881,7 @@ next_iolats (void)
 			}
 			x = t.time - p->time;
 			g_array_append_val(vals, x);
-			free(p);
+			g_free(p);
 			break;
 		case __BLK_TA_ISSUE:
 			stash_io(t);
