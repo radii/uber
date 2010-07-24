@@ -164,6 +164,29 @@ uber_heat_map_get_next_values (UberHeatMap  *map,    /* IN */
 }
 
 /**
+ * uber_heat_map_set_value_func:
+ * @map: A #UberHeatMap.
+ *
+ * Returns: None.
+ * Side effects: value_func member is set.
+ */
+void
+uber_heat_map_set_value_func (UberHeatMap     *map,
+                              UberHeatMapFunc  func,
+                              gpointer         user_data,
+                              GDestroyNotify   notify)
+{
+	UberHeatMapPrivate *priv;
+
+	g_return_if_fail(UBER_IS_HEAT_MAP(map));
+
+	priv = map->priv;
+	priv->value_func = func;
+	priv->value_user_data = user_data;
+	priv->value_notify = notify;
+}
+
+/**
  * uber_heat_map_init_drawables:
  * @map: A #UberHeatMap.
  *

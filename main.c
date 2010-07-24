@@ -95,6 +95,11 @@ typedef struct
 	volatile gint n_threads;
 } ThreadInfo;
 
+typedef struct
+{
+	volatile GAsyncQueue* q;
+} IoLatInfo;
+
 struct io_list {
 	struct blk_io_trace *t;
 	struct io_list *next;
@@ -109,6 +114,7 @@ static LoadInfo   load_info  = { 0 };
 static PmemInfo   pmem_info  = { 0 };
 static SchedInfo  sched_info = { 0 };
 static ThreadInfo thread_info= { 0 };
+static IoLatInfo  iolat_info = { 0 };
 static GtkWidget *load_graph = NULL;
 static GtkWidget *cpu_graph  = NULL;
 static GtkWidget *cpu_label_hbox = NULL;
@@ -237,6 +243,22 @@ get_threads (UberGraph *graph,
 		g_assert_not_reached();
 	}
 	return TRUE;
+}
+
+static gboolean
+get_iolat (UberHeatMap  *map,
+           GArray      **values,
+           gpointer      user_data)
+{
+	GArray *v;
+	
+	while((v = g_async_queue_try_pop((GAsyncQueue *)iolat_info.q)) != NULL) {
+		if (g_async_queue_length((GAsyncQueue *)iolat_info.q) == 0)
+			break;
+		g_array_unref(v);
+	}
+	*values = v;
+	return !!v;
 }
 
 static gboolean
@@ -683,6 +705,13 @@ setup_blktrace(void)
 	g_print("blktrace set up on fd %d\n", blktrace_fd);
 }
 
+static void
+setup_iolats(void)
+{
+	setup_blktrace();
+	iolat_info.q = g_async_queue_new_full(0);
+}
+
 static inline int tvdiff(const struct timeval a, const struct timeval b)
 {
 	return (b.tv_sec - a.tv_sec) * 1000000 + (b.tv_usec - a.tv_usec);
@@ -854,14 +883,13 @@ next_iolats (void)
 {
 	struct blk_io_trace t, *p;
 	int i, n = 0, x, td;
-	static GArray *vals;
+	GArray *vals;
 	struct timeval tv1, tv2;
 
 	if (blktrace_fd == -1) return;
 
 	gettimeofday(&tv1, 0);
-	if (!vals)
-		vals = g_array_new(FALSE, FALSE, sizeof(gint));
+	vals = g_array_new(FALSE, FALSE, sizeof(gint));
 	g_array_set_size(vals, 0);
 
 	while (read_blktrace(blktrace_fd, &t)) {
@@ -912,6 +940,7 @@ next_iolats (void)
 	for (i=0; i<vals->len; i++)
 		printf("%d ", (int)g_array_index(vals, gint, i) / 1000);
 	printf("\n");
+	g_async_queue_push((GAsyncQueue*)iolat_info.q, vals);
 }
 
 static inline GtkWidget*
@@ -940,7 +969,7 @@ create_main_window (void)
 	GtkWidget *hbox;
 	GtkWidget *label;
 	GtkWidget *group;
-#if 0
+#if 1
 	GtkWidget *heat;
 	GtkWidget *heat2;
 #endif
@@ -1104,11 +1133,12 @@ create_main_window (void)
 	uber_label_bind_graph(UBER_LABEL(label), UBER_GRAPH(mem_graph), 2);
 	mem_label_hbox = hbox;
 
-#if 0
+#if 1
 	heat = uber_heat_map_new();
 	uber_heat_map_set_block_size(UBER_HEAT_MAP(heat),
 	                             60, TRUE,
 	                             5, FALSE);
+	uber_heat_map_set_value_func(UBER_HEAT_MAP(heat), get_iolat, NULL, NULL);
 	gtk_container_add(GTK_CONTAINER(vbox), heat);
 	gtk_widget_show(heat);
 
@@ -1120,7 +1150,7 @@ create_main_window (void)
 	gtk_widget_show(heat2);
 #endif
 
-	setup_blktrace();
+	setup_iolats();
 	next_iolats();
 
 	next_load();
