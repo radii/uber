@@ -16,13 +16,17 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#if HAVE_CONFIG_H
+#ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#include <math.h>
 
 #include "uber-graph.h"
 
 #define WIDGET_CLASS (GTK_WIDGET_CLASS(uber_graph_parent_class))
+#define RECT_RIGHT(r)  ((r).x + (r).width)
+#define RECT_BOTTOM(r) ((r).y + (r).height)
 
 /**
  * SECTION:uber-graph.h
@@ -56,7 +60,6 @@ struct _UberGraphPrivate
 	gint          x_slots;       /* Number of data points on x axis. */
 	gint          fps;           /* Desired frames per second. */
 	gint          fps_real;      /* Milleseconds between FPS callbacks. */
-	gint          fps_off;       /* Frame offset since last data point. */
 	gfloat        fps_each;      /* How far to move in each FPS tick. */
 	guint         fps_handler;   /* Timeout for moving the content. */
 	gfloat        dps;           /* Desired data points per second. */
@@ -106,14 +109,11 @@ uber_graph_fps_timeout (UberGraph *graph) /* IN */
 	g_return_val_if_fail(UBER_IS_GRAPH(graph), FALSE);
 
 	priv = graph->priv;
-	if (priv->fps_off) {
-		gtk_widget_queue_draw_area(GTK_WIDGET(graph),
-		                           priv->content_rect.x,
-		                           priv->content_rect.y,
-		                           priv->content_rect.width,
-		                           priv->content_rect.height);
-	}
-	priv->fps_off++;
+	gtk_widget_queue_draw_area(GTK_WIDGET(graph),
+	                           priv->content_rect.x,
+	                           priv->content_rect.y,
+	                           priv->content_rect.width,
+	                           priv->content_rect.height);
 	return TRUE;
 }
 
@@ -130,10 +130,10 @@ static inline gboolean
 uber_graph_get_next_data (UberGraph *graph) /* IN */
 {
 	UberGraphPrivate *priv;
+	gboolean ret = FALSE;
 
 	g_return_val_if_fail(UBER_IS_GRAPH(graph), FALSE);
 
-	g_debug("%s()", G_STRFUNC);
 	/*
 	 * Get the current time for this data point.  This is used to calculate
 	 * the proper offset in the FPS callback.
@@ -144,9 +144,12 @@ uber_graph_get_next_data (UberGraph *graph) /* IN */
 	 * Notify the subclass to retrieve the data point.
 	 */
 	if (UBER_GRAPH_GET_CLASS(graph)->get_next_data) {
-		return UBER_GRAPH_GET_CLASS(graph)->get_next_data(graph);
+		if ((ret = UBER_GRAPH_GET_CLASS(graph)->get_next_data(graph))) {
+			priv->fg_dirty = TRUE;
+			gtk_widget_queue_draw(GTK_WIDGET(graph));
+		}
 	}
-	return FALSE;
+	return ret;
 }
 
 /**
@@ -167,7 +170,7 @@ uber_graph_init_texture (UberGraph    *graph,   /* IN */
 	GdkDrawable *drawable;
 	GdkColormap *colormap;
 	GdkVisual *visual;
-	gint depth = 32;
+	gint depth = -1;
 	gint width;
 
 	g_return_if_fail(UBER_IS_GRAPH(graph));
@@ -182,12 +185,11 @@ uber_graph_init_texture (UberGraph    *graph,   /* IN */
 		return;
 	}
 	/*
-	 * If we do not have 32-bit RGBA colormaps, we need to fallback to XOR
-	 * rendering.
+	 * Check if we can do 32-bit RGBA colormaps.
 	 */
-	if (!priv->have_rgba) {
+	if (priv->have_rgba) {
 		drawable = NULL;
-		depth = -1;
+		depth = 32;
 	}
 	/*
 	 * Initialize foreground and background pixmaps.
@@ -251,13 +253,43 @@ uber_graph_init_bg (UberGraph *graph) /* IN */
 	UberGraphPrivate *priv;
 	GdkDrawable *drawable;
 	GtkAllocation alloc;
+	GdkVisual *visual;
+	GdkColormap *colormap;
+	gint depth = 32;
 
 	g_return_if_fail(UBER_IS_GRAPH(graph));
 
 	priv = graph->priv;
 	gtk_widget_get_allocation(GTK_WIDGET(graph), &alloc);
-	drawable = gtk_widget_get_window(GTK_WIDGET(graph));
-	priv->bg_pixmap = gdk_pixmap_new(drawable, alloc.width, alloc.height, -1);
+	/*
+	 * Get drawable for pixmap.
+	 */
+	if (!(drawable = gtk_widget_get_window(GTK_WIDGET(graph)))) {
+		g_critical("%s() called before GdkWindow is allocated.", G_STRFUNC);
+		return;
+	}
+	/*
+	 * Fallback if we don't have 32-bit RGBA rendering.
+	 */
+	if (!priv->have_rgba) {
+		depth = -1;
+	}
+	/*
+	 * Create the server-side pixmap.
+	 */
+	priv->bg_pixmap = gdk_pixmap_new(drawable, alloc.width, alloc.height, depth);
+	/*
+	 * Setup 32-bit colormap if needed.
+	 */
+	if (priv->have_rgba) {
+		visual = gdk_visual_get_best_with_depth(depth);
+		colormap = gdk_colormap_new(visual, FALSE);
+		gdk_drawable_set_colormap(GDK_DRAWABLE(priv->bg_pixmap), colormap);
+		g_object_unref(colormap);
+	}
+	/*
+	 * Create cairo texture for drawing.
+	 */
 	priv->bg_cairo = gdk_cairo_create(priv->bg_pixmap);
 }
 
@@ -346,9 +378,12 @@ uber_graph_calculate_rects (UberGraph *graph) /* IN */
 	 */
 	priv->dps_each = (gfloat)priv->content_rect.width / (gfloat)(priv->x_slots - 1);
 	priv->fps_each = priv->dps_each / ((gfloat)priv->fps / (gfloat)priv->dps);
-	if (priv->fps_each < 1.) {
+	/*
+	 * XXX: Small hack to make things a bit smoother at small scales.
+	 */
+	if (priv->fps_each < .5) {
 		priv->fps_each = 1;
-		priv->fps_real = 1000. / priv->dps_each;
+		priv->fps_real = (1000. / priv->dps_each) / 2.;
 	} else {
 		priv->fps_real = 1000. / priv->fps;
 	}
@@ -394,7 +429,6 @@ uber_graph_dps_timeout (UberGraph *graph) /* IN */
 	 * Make sure the content is re-rendered.
 	 */
 	priv->fg_dirty = TRUE;
-	priv->fps_off = 0;
 	gtk_widget_queue_draw_area(GTK_WIDGET(graph),
 	                           priv->content_rect.x,
 	                           priv->content_rect.y,
@@ -719,14 +753,20 @@ static void
 uber_graph_render_fg (UberGraph *graph) /* IN */
 {
 	UberGraphPrivate *priv;
+	GtkAllocation alloc;
 	GraphTexture *dst;
 	GraphTexture *src;
 	GdkRectangle rect;
+	gfloat each;
+	gfloat x_epoch;
 
 	g_return_if_fail(UBER_IS_GRAPH(graph));
 
-	g_debug("%s()", G_STRFUNC);
+	/*
+	 * Acquire resources.
+	 */
 	priv = graph->priv;
+	gtk_widget_get_allocation(GTK_WIDGET(graph), &alloc);
 	uber_graph_get_pixmap_rect(graph, &rect);
 	src = &priv->texture[priv->flipped];
 	dst = &priv->texture[!priv->flipped];
@@ -746,19 +786,51 @@ uber_graph_render_fg (UberGraph *graph) /* IN */
 		 * If we are in a fast draw, lets copy the content from the other
 		 * buffer at the next offset.
 		 */
-		if (!priv->full_draw) {
-		}
-		/*
-		 * Render the new content.
-		 */
-		if (UBER_GRAPH_GET_CLASS(graph)->render) {
+		if (!priv->full_draw && UBER_GRAPH_GET_CLASS(graph)->render_fast) {
+			/*
+			 * Render previous data shifted.
+			 */
 			cairo_save(dst->fg_cairo);
-			gdk_cairo_rectangle(dst->fg_cairo, &priv->nonvis_rect);
-			cairo_clip(dst->fg_cairo);
-			UBER_GRAPH_GET_CLASS(graph)->render(graph,
-			                                    dst->fg_cairo,
-			                                    &priv->nonvis_rect);
+			cairo_set_antialias(dst->fg_cairo, CAIRO_ANTIALIAS_NONE);
+			cairo_set_operator(dst->fg_cairo, CAIRO_OPERATOR_SOURCE);
+			gdk_cairo_set_source_pixmap(dst->fg_cairo, src->fg_pixmap,
+			                            -(gint)priv->dps_each, 0);
+			cairo_rectangle(dst->fg_cairo, 0, 0, alloc.width, alloc.height);
+			cairo_paint(dst->fg_cairo);
 			cairo_restore(dst->fg_cairo);
+
+			/*
+			 * Render new content clipped.
+			 */
+			cairo_save(dst->fg_cairo);
+			gdk_cairo_reset_clip(dst->fg_cairo, dst->fg_pixmap);
+			cairo_rectangle(dst->fg_cairo,
+			                RECT_RIGHT(priv->content_rect),
+			                0,
+			                RECT_RIGHT(priv->nonvis_rect) - RECT_RIGHT(priv->content_rect),
+			                alloc.height);
+			cairo_clip(dst->fg_cairo);
+			each = priv->content_rect.width / (gfloat)priv->x_slots;
+			x_epoch = RECT_RIGHT(priv->content_rect) + each;
+			UBER_GRAPH_GET_CLASS(graph)->render_fast(graph,
+			                                         dst->fg_cairo,
+			                                         &priv->nonvis_rect,
+			                                         x_epoch,
+			                                         each);
+			cairo_restore(dst->fg_cairo);
+		} else {
+			/*
+			 * Draw the entire foreground.
+			 */
+			if (UBER_GRAPH_GET_CLASS(graph)->render) {
+				cairo_save(dst->fg_cairo);
+				gdk_cairo_rectangle(dst->fg_cairo, &priv->nonvis_rect);
+				cairo_clip(dst->fg_cairo);
+				UBER_GRAPH_GET_CLASS(graph)->render(graph,
+				                                    dst->fg_cairo,
+				                                    &priv->nonvis_rect);
+				cairo_restore(dst->fg_cairo);
+			}
 		}
 	}
 	/*
@@ -810,7 +882,6 @@ uber_graph_render_bg (UberGraph *graph) /* IN */
 
 	g_return_if_fail(UBER_IS_GRAPH(graph));
 
-	g_debug("%s()", G_STRFUNC);
 	/*
 	 * Acquire resources.
 	 */
@@ -824,10 +895,11 @@ uber_graph_render_bg (UberGraph *graph) /* IN */
 	g_assert(priv->bg_cairo);
 	g_assert(priv->bg_pixmap);
 	/*
-	 * Paint the background.
+	 * Clear entire background.  Hopefully this looks okay for RGBA themes
+	 * that are translucent.
 	 */
 	cairo_save(priv->bg_cairo);
-	gdk_cairo_set_source_color(priv->bg_cairo, &style->bg[GTK_STATE_NORMAL]);
+	cairo_set_operator(priv->bg_cairo, CAIRO_OPERATOR_CLEAR);
 	cairo_rectangle(priv->bg_cairo, 0, 0, alloc.width, alloc.height);
 	cairo_fill(priv->bg_cairo);
 	cairo_restore(priv->bg_cairo);
@@ -898,21 +970,12 @@ uber_graph_get_fps_offset (UberGraph *graph) /* IN */
 	g_return_val_if_fail(UBER_IS_GRAPH(graph), 0.);
 
 	priv = graph->priv;
-	/*
-	 * Get the time difference between now and last sample in milliseconds.
-	 */
 	g_get_current_time(&tv);
 	g_time_val_subtract(&tv, &priv->dps_tv, &rel);
-	f = (rel.tv_sec * 1000) + (rel.tv_usec / 1000.);
-	/*
-	 * Determine the number of frames we should be off from the origin
-	 * by dividing the msec offset by the msec between callbacks.
-	 */
-	f /= (gfloat)priv->fps_real;
-	/*
-	 * f is now the number of frames we should be from the origin.
-	 */
-	return MIN(f * priv->fps_each, priv->dps_each);
+	f = ((rel.tv_sec * 1000) + (rel.tv_usec / 1000))
+	  / (1000. / priv->dps) /* MSec Per Data Point */
+	  * priv->dps_each;     /* Pixels Per Data Point */
+	return MIN(f, (priv->dps_each - priv->fps_each));
 }
 
 /**
@@ -944,6 +1007,14 @@ uber_graph_expose_event (GtkWidget      *widget, /* IN */
 	 */
 	g_assert(src->fg_pixmap);
 	g_assert(priv->bg_pixmap);
+	/*
+	 * Clear window background.
+	 */
+	gdk_window_clear_area(expose->window,
+	                      expose->area.x,
+	                      expose->area.y,
+	                      expose->area.width,
+	                      expose->area.height);
 	/*
 	 * Allocate resources.
 	 */
@@ -990,7 +1061,7 @@ uber_graph_expose_event (GtkWidget      *widget, /* IN */
 		/*
 		 * Draw the foreground to the widget.
 		 */
-		gdk_cairo_set_source_pixmap(cr, src->fg_pixmap, -offset, 0);
+		gdk_cairo_set_source_pixmap(cr, src->fg_pixmap, -(gint)offset, 0);
 		cairo_rectangle(cr, 0, 0, alloc.width, alloc.height);
 		cairo_paint(cr);
 		cairo_restore(cr);
@@ -1025,6 +1096,7 @@ uber_graph_style_set (GtkWidget *widget,    /* IN */
 	g_return_if_fail(UBER_IS_GRAPH(widget));
 
 	priv = UBER_GRAPH(widget)->priv;
+	WIDGET_CLASS->style_set(widget, old_style);
 	priv->fg_dirty = TRUE;
 	priv->bg_dirty = TRUE;
 	gtk_widget_queue_draw(widget);
@@ -1075,6 +1147,7 @@ uber_graph_size_allocate (GtkWidget     *widget, /* IN */
 	 */
 	priv->fg_dirty = TRUE;
 	priv->bg_dirty = TRUE;
+	priv->full_draw = TRUE;
 	gtk_widget_queue_draw(widget);
 }
 

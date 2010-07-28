@@ -75,6 +75,9 @@ void              uber_line_graph_set_data_func (UberLineGraph     *graph,
                                                  UberLineGraphFunc  func,
                                                  gpointer           user_data,
                                                  GDestroyNotify     notify);
+gboolean          uber_line_graph_get_autoscale (UberLineGraph     *graph);
+void              uber_line_graph_set_autoscale (UberLineGraph     *graph,
+                                                 gboolean           autoscale);
 
 G_END_DECLS
 

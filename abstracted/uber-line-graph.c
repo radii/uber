@@ -16,7 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#if HAVE_CONFIG_H
+#ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
@@ -24,6 +24,9 @@
 
 #include "uber-line-graph.h"
 #include "g-ring.h"
+
+#define RECT_BOTTOM(r) ((r).y + (r).height)
+#define RECT_RIGHT(r)  ((r).x + (r).width)
 
 /**
  * SECTION:uber-line-graph.h
@@ -47,6 +50,7 @@ struct _UberLineGraphPrivate
 	GArray            *lines;
 	cairo_antialias_t  antialias;
 	guint              stride;
+	gboolean           autoscale;
 	UberLineGraphFunc  func;
 	gpointer           func_data;
 	GDestroyNotify     func_notify;
@@ -89,6 +93,45 @@ uber_line_graph_new (void)
 
 	graph = g_object_new(UBER_TYPE_LINE_GRAPH, NULL);
 	return GTK_WIDGET(graph);
+}
+
+/**
+ * uber_line_graph_set_autoscale:
+ * @graph: A #UberLineGraph.
+ * @autoscale: Should we autoscale.
+ *
+ * Sets if we should autoscale the range of the graph when a new input
+ * value is outside the visible range.
+ *
+ * Returns: None.
+ * Side effects: None.
+ */
+void
+uber_line_graph_set_autoscale (UberLineGraph *graph,     /* IN */
+                               gboolean       autoscale) /* IN */
+{
+	UberLineGraphPrivate *priv;
+
+	g_return_if_fail(UBER_IS_LINE_GRAPH(graph));
+
+	priv = graph->priv;
+	priv->autoscale = autoscale;
+}
+
+/**
+ * uber_line_graph_get_autoscale:
+ * @graph: A #UberLineGraph.
+ *
+ * XXX
+ *
+ * Returns: None.
+ * Side effects: None.
+ */
+gboolean
+uber_line_graph_get_autoscale (UberLineGraph *graph) /* IN */
+{
+	g_return_val_if_fail(UBER_IS_LINE_GRAPH(graph), FALSE);
+	return graph->priv->autoscale;
 }
 
 /**
@@ -215,10 +258,11 @@ uber_line_graph_get_next_data (UberGraph *graph) /* IN */
 			                       priv->func_data))) {
 				val = -INFINITY;
 			}
+			g_ring_append_val(line->raw_data, val);
 			/*
 			 * TODO: Scale value.
 			 */
-			g_ring_append_val(line->raw_data, val);
+			g_ring_append_val(line->scaled_data, val);
 		}
 	}
 	return ret;
@@ -385,6 +429,78 @@ uber_line_graph_render (UberGraph    *graph, /* IN */
 }
 
 /**
+ * uber_line_graph_render_fast:
+ * @graph: A #UberGraph.
+ *
+ * XXX
+ *
+ * Returns: None.
+ * Side effects: None.
+ */
+static void
+uber_line_graph_render_fast (UberGraph    *graph, /* IN */
+                             cairo_t      *cr,    /* IN */
+                             GdkRectangle *rect,  /* IN */
+                             guint         epoch, /* IN */
+                             gfloat        each)  /* IN */
+{
+	UberLineGraphPrivate *priv;
+	LineInfo *line;
+	gdouble last_y;
+	gdouble y;
+	gint i;
+
+	g_return_if_fail(UBER_IS_LINE_GRAPH(graph));
+	g_return_if_fail(cr != NULL);
+	g_return_if_fail(rect != NULL);
+
+	priv = UBER_LINE_GRAPH(graph)->priv;
+	/*
+	 * Prepare cairo line styling.
+	 */
+	cairo_set_line_width(cr, 1.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_set_antialias(cr, CAIRO_ANTIALIAS_DEFAULT);
+	/*
+	 * Render most recent data point for each line.
+	 */
+	for (i = 0; i < priv->lines->len; i++) {
+		line = &g_array_index(priv->lines, LineInfo, i);
+		gdk_cairo_set_source_color(cr, &line->color);
+		/*
+		 * Calculate positions.
+		 */
+		y = g_ring_get_index(line->scaled_data, gdouble, 0);
+		last_y = g_ring_get_index(line->scaled_data, gdouble, 1);
+		/*
+		 * Don't try to draw before we have real values.
+		 */
+		if ((isnan(y) || isinf(y)) || (isnan(last_y) || isinf(last_y))) {
+			continue;
+		}
+		/*
+		 * Translate position from bottom right corner.
+		 */
+		y = RECT_BOTTOM(*rect) - y;
+		last_y = RECT_BOTTOM(*rect) - last_y;
+		/*
+		 * Convert relative position to fixed from bottom pixel.
+		 */
+		cairo_new_path(cr);
+		cairo_move_to(cr, epoch, y);
+		cairo_curve_to(cr,
+		               epoch - (each / 2.),
+		               y,
+		               epoch - (each / 2.),
+		               last_y,
+		               epoch - each,
+		               last_y);
+		cairo_stroke(cr);
+	}
+}
+
+/**
  * uber_line_graph_set_stride:
  * @graph: A #UberGraph.
  * @stride: The number of data points within the graph.
@@ -476,6 +592,7 @@ uber_line_graph_class_init (UberLineGraphClass *klass) /* IN */
 	graph_class = UBER_GRAPH_CLASS(klass);
 	graph_class->get_next_data = uber_line_graph_get_next_data;
 	graph_class->render = uber_line_graph_render;
+	graph_class->render_fast = uber_line_graph_render_fast;
 	graph_class->set_stride = uber_line_graph_set_stride;
 }
 

@@ -38,7 +38,6 @@ TRACE_INCLUDES =							\
 	$(NULL)
 
 INCLUDES =								\
-	-DHAVE_CONFIG_H=0						\
 	-I../								\
 	$(NULL)
 
@@ -46,6 +45,7 @@ OBJECTS =								\
 	uber-graph.o							\
 	uber-line-graph.o						\
 	uber-heat-map.o							\
+	uber-scatter.o							\
 	main.o								\
 	g-ring.o							\
 	$(NULL)

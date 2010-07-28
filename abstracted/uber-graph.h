@@ -51,12 +51,11 @@ struct _UberGraphClass
 	void     (*render)        (UberGraph    *graph,
 	                           cairo_t      *cairo,
 	                           GdkRectangle *content_area);
-	void     (*render_area)   (UberGraph    *graph,
+	void     (*render_fast)   (UberGraph    *graph,
 	                           cairo_t      *cairo,
 	                           GdkRectangle *content_area,
-	                           GdkRectangle *area,
-	                           guint         range_start,
-	                           guint         range_end);
+	                           guint         epoch,
+	                           gfloat        each);
 	void     (*set_stride)    (UberGraph    *graph,
 	                           guint         stride);
 };
