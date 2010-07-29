@@ -509,11 +509,16 @@ uber_heat_map_render_fg (UberHeatMap *map,       /* IN */
 	 * Render the contents for the various blocks.
 	 */
 	for (ix = 0; ix < xcount; ix++) {
+		GArray *col = g_ring_get_index(priv->ring, GArray *, ix);
+
 		/*
 		 * Draw the column content.
 		 */
 		for (iy = 0; iy < ycount; iy++) {
-			alpha = g_random_double_range(0., 1.);
+			if (col && iy < col->len)
+				alpha = g_array_index(col, gint, iy);
+			else
+				alpha = 0;
 			/*
 			 * Set content rectangle path.
 			 */

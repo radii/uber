@@ -59,6 +59,7 @@ G_BEGIN_DECLS
                             ((ring)->pos - 1 - (i)) :                 \
                             ((ring)->len + ((ring)->pos - 1 - (i)))])
 
+
 typedef struct _GRing GRing;
 
 struct _GRing

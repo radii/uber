@@ -250,14 +250,16 @@ get_iolat (UberHeatMap  *map,
            GArray      **values,
            gpointer      user_data)
 {
-	GArray *v;
+	GArray *v, *sum;
 	
+	sum = g_array_sized_new(FALSE, TRUE, sizeof(gint), 1 /* map->nbucket */);
+
 	while((v = g_async_queue_try_pop((GAsyncQueue *)iolat_info.q)) != NULL) {
 		if (g_async_queue_length((GAsyncQueue *)iolat_info.q) == 0)
 			break;
 		g_array_unref(v);
 	}
-	*values = v;
+	*values = sum;
 	return !!v;
 }
 
